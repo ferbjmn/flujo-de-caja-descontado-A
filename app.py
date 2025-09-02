@@ -1,9 +1,7 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import numpy as np
 import plotly.graph_objects as go
-from urllib.error import URLError
 
 # ---------------- CONFIGURACIÓN PÁGINA ----------------
 st.set_page_config(
@@ -33,22 +31,23 @@ def get_financial_data(ticker):
     try:
         stock = yf.Ticker(ticker)
 
-        # Usar fast_info
-        fast = stock.fast_info
-        current_price = fast.get("last_price", 100.0)
-        shares_outstanding = fast.get("shares", 1_000_000)
+        # Datos básicos
+        info = stock.info
+        current_price = info.get("currentPrice") or info.get("regularMarketPrice", 100.0)
+        shares_outstanding = info.get("sharesOutstanding", 1_000_000)
 
         # Estimación inicial de FCF (5% del Market Cap)
         fcf = current_price * shares_outstanding * 0.05
 
-        # Intentar calcular FCF real desde cashflow
+        # Intentar calcular FCF desde cashflow
         try:
             cf = stock.cashflow
             if not cf.empty:
-                op_cf = cf.loc["Total Cash From Operating Activities"].iloc[0]
-                capex = cf.loc["Capital Expenditures"].iloc[0]
-                if not pd.isna(op_cf) and not pd.isna(capex):
-                    fcf = float(op_cf + capex)  # FCF = OCF - CAPEX
+                if "Total Cash From Operating Activities" in cf.index and "Capital Expenditures" in cf.index:
+                    op_cf = cf.loc["Total Cash From Operating Activities"].iloc[0]
+                    capex = cf.loc["Capital Expenditures"].iloc[0]
+                    if pd.notna(op_cf) and pd.notna(capex):
+                        fcf = float(op_cf + capex)  # FCF = OCF - CAPEX
         except Exception:
             pass
 
@@ -57,12 +56,8 @@ def get_financial_data(ticker):
             "shares_outstanding": float(shares_outstanding),
             "fcf": float(fcf)
         }
-
-    except URLError as e:
-        st.error(f"Error de conexión: {e}")
-        return None
     except Exception as e:
-        st.error(f"Error obteniendo datos: {e}")
+        st.error(f"Error obteniendo datos financieros: {e}")
         return None
 
 
@@ -72,15 +67,11 @@ def dcf_valuation(current_fcf, growth_rate, terminal_growth, discount_rate, year
         if current_fcf <= 0 or shares <= 0:
             return None
         if terminal_growth >= discount_rate:
-            terminal_growth = max(0, discount_rate - 0.01)
+            terminal_growth = discount_rate - 0.01
 
-        # Proyección de FCF
         future_cash_flows = [current_fcf * (1 + growth_rate) ** year for year in range(1, years + 1)]
-
-        # Valor terminal
         terminal_value = future_cash_flows[-1] * (1 + terminal_growth) / (discount_rate - terminal_growth)
 
-        # Descuento de flujos y terminal
         present_values = [fcf / (1 + discount_rate) ** (i + 1) for i, fcf in enumerate(future_cash_flows)]
         terminal_pv = terminal_value / (1 + discount_rate) ** years
 
@@ -127,20 +118,7 @@ if st.sidebar.button("Calcular Valor Intrínseco"):
                 diff_pct = (diff / data["current_price"]) * 100
                 st.metric("Diferencia con precio actual", f"${diff:.2f}", f"{diff_pct:.1f}%")
 
-                # Recomendación
-                if results['intrinsic_value'] > data['current_price'] * 1.2:
-                    rec, color = "FUERTE COMPRA 🚀", "green"
-                elif results['intrinsic_value'] > data['current_price']:
-                    rec, color = "COMPRA ✅", "lightgreen"
-                elif results['intrinsic_value'] > data['current_price'] * 0.8:
-                    rec, color = "MANTENER ⚖️", "orange"
-                else:
-                    rec, color = "VENDE 🔴", "red"
-
-                st.markdown(f"### **Recomendación:** <span style='color:{color}'>{rec}</span>",
-                            unsafe_allow_html=True)
-
-            # ---------------- GRÁFICO ----------------
+            # Gráfico
             years = list(range(1, years_projection + 1))
             fig = go.Figure()
             fig.add_trace(go.Bar(x=years, y=results["future_cash_flows"], name="FCF Proyectado"))
@@ -151,7 +129,7 @@ if st.sidebar.button("Calcular Valor Intrínseco"):
             st.subheader("Proyección de Flujo de Caja Libre")
             st.plotly_chart(fig, use_container_width=True)
 
-            # ---------------- TABLA ----------------
+            # Tabla
             df = pd.DataFrame({
                 "Año": years,
                 "FCF Proyectado": [f"${x:,.0f}" for x in results["future_cash_flows"]],
@@ -170,12 +148,12 @@ if st.sidebar.button("Calcular Valor Intrínseco"):
 with st.expander("ℹ️ Acerca de este método"):
     st.markdown("""
     **Método DCF (Flujo de Caja Descontado)**
-    
+
     - **FCF**: Flujo de Caja Libre
     - **Tasa de crecimiento**: Crecimiento anual proyectado
     - **Tasa de descuento**: Rentabilidad mínima esperada
     - **Crecimiento terminal**: Crecimiento perpetuo después del período proyectado
-    
+
     **Fórmula simplificada:**
     - Valor = Σ [FCFₜ / (1 + r)ᵗ] + [FCFₙ × (1 + g) / (r - g)] / (1 + r)ⁿ
     """)
