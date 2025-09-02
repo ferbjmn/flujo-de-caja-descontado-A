@@ -5,7 +5,6 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 
 # Configuración de la página
@@ -44,7 +43,7 @@ debt_to_equity = st.sidebar.slider("Deuda/Patrimonio", 0.0, 2.0, 0.5)
 cost_of_debt = st.sidebar.slider("Costo de la deuda (%)", 2.0, 10.0, 5.0) / 100
 
 # Función para obtener datos financieros
-@st.cache_data(ttl=3600)  # Cache por 1 hora
+@st.cache_data(ttl=3600, show_spinner="Obteniendo datos financieros...")  # Cache por 1 hora
 def get_financial_data(ticker):
     try:
         stock = yf.Ticker(ticker)
@@ -56,12 +55,12 @@ def get_financial_data(ticker):
         balance_sheet = stock.balance_sheet
         
         # Extraer Free Cash Flow
-        if 'Free Cash Flow' in cash_flow.index:
-            fcf = cash_flow.loc['Free Cash Flow']
-        elif 'Operating Cash Flow' in cash_flow.index and 'Capital Expenditure' in cash_flow.index:
-            fcf = cash_flow.loc['Operating Cash Flow'] - cash_flow.loc['Capital Expenditure']
-        else:
-            fcf = None
+        fcf = None
+        if not cash_flow.empty:
+            if 'Free Cash Flow' in cash_flow.index:
+                fcf = cash_flow.loc['Free Cash Flow']
+            elif 'Operating Cash Flow' in cash_flow.index and 'Capital Expenditure' in cash_flow.index:
+                fcf = cash_flow.loc['Operating Cash Flow'] - cash_flow.loc['Capital Expenditure']
             
         # Obtener datos relevantes
         current_price = info.get('currentPrice', info.get('regularMarketPrice', 0))
@@ -105,7 +104,7 @@ def dcf_valuation(fcf_data, growth_rate, terminal_growth, discount_rate, years_p
         return None
         
     # Usar el FCF más reciente
-    current_fcf = fcf_data.iloc[0]
+    current_fcf = fcf_data.iloc[0] if hasattr(fcf_data, 'iloc') else fcf_data[0]
     
     # Proyectar flujos de caja futuros
     future_cash_flows = []
@@ -143,10 +142,16 @@ def dcf_valuation(fcf_data, growth_rate, terminal_growth, discount_rate, years_p
         'terminal_value': terminal_value
     }
 
-# Obtener datos
-financial_data = get_financial_data(ticker_symbol)
+# Obtener datos con manejo de errores
+try:
+    with st.spinner('Obteniendo datos financieros...'):
+        financial_data = get_financial_data(ticker_symbol)
+except Exception as e:
+    st.error(f"Error al conectar con Yahoo Finance: {str(e)}")
+    st.info("Esto puede deberse a limitaciones de la API o problemas de conexión. Intenta nuevamente en unos momentos.")
+    financial_data = None
 
-if financial_data:
+if financial_data and financial_data['fcf'] is not None:
     # Mostrar información de la empresa
     info = financial_data['info']
     col1, col2, col3 = st.columns(3)
@@ -197,14 +202,15 @@ if financial_data:
         st.metric("Beta", f"{financial_data['beta']:.2f}")
     
     # Realizar valuación DCF
-    results = dcf_valuation(
-        fcf_data=financial_data['fcf'],
-        growth_rate=growth_rate,
-        terminal_growth=terminal_growth,
-        discount_rate=wacc,
-        years_projection=years_projection,
-        shares_outstanding=financial_data['shares_outstanding']
-    )
+    with st.spinner('Calculando valor intrínseco...'):
+        results = dcf_valuation(
+            fcf_data=financial_data['fcf'],
+            growth_rate=growth_rate,
+            terminal_growth=terminal_growth,
+            discount_rate=wacc,
+            years_projection=years_projection,
+            shares_outstanding=financial_data['shares_outstanding']
+        )
     
     if results:
         # Mostrar resultados
@@ -333,6 +339,8 @@ if financial_data:
     else:
         st.error("No se pudieron calcular los resultados del DCF. Verifique los datos financieros.")
         
+elif financial_data and financial_data['fcf'] is None:
+    st.error("No se pudo obtener el Flujo de Caja Libre (FCF) para esta empresa. Intenta con otro ticker.")
 else:
     st.error(f"No se pudieron obtener datos para el ticker {ticker_symbol}. Verifique el símbolo e intente nuevamente.")
 
@@ -341,5 +349,5 @@ st.markdown("---")
 st.markdown("""
 *Disclaimer*: Esta herramienta es solo con fines educativos e informativos. 
 El valor intrínseco calculado se basa en supuestos y proyecciones que pueden no ser exactos. 
-No constituye asesoramiento financiero. Siempre realice su propia investigación antes de tomar decisiones de inversión.
+No constituye asesoramiento financiero. Siempre realice su propia investigación antes de tomar decisiones de inversión.
 """)
