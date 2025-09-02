@@ -3,6 +3,8 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+import requests
+from urllib.error import URLError
 
 # Configuración de la página
 st.set_page_config(
@@ -25,48 +27,43 @@ growth_rate = st.sidebar.slider("Tasa de crecimiento inicial (%)", 0.0, 20.0, 5.
 terminal_growth = st.sidebar.slider("Tasa de crecimiento terminal (%)", 0.0, 5.0, 2.5) / 100
 discount_rate = st.sidebar.slider("Tasa de descuento (%)", 5.0, 15.0, 10.0) / 100
 
-# Función para obtener datos financieros
+# Función para obtener datos financieros con mejor manejo de errores
 @st.cache_data(ttl=3600)
 def get_financial_data(ticker):
     try:
-        stock = yf.Ticker(ticker)
+        # Configurar headers para evitar problemas CORS
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        })
+        
+        stock = yf.Ticker(ticker, session=session)
         info = stock.info
         
-        # Obtener datos básicos con múltiples opciones
+        # Obtener datos básicos con valores por defecto
         current_price = info.get('currentPrice', 
                                info.get('regularMarketPrice', 
                                        info.get('previousClose', 100)))
         
         shares_outstanding = info.get('sharesOutstanding', 
-                                    info.get('floatShares', 
-                                            info.get('sharesOutstanding', 1000000)))
+                                    info.get('floatShares', 1000000))
         
-        # Obtener FCF de forma robusta
-        fcf = 0
+        # Obtener FCF - enfoque simplificado para evitar errores
+        fcf = current_price * shares_outstanding * 0.05  # 5% del market cap como estimación
+        
+        # Intentar obtener cash flow si está disponible
         try:
-            # Obtener cash flow statements
             cash_flow = stock.cashflow
             if not cash_flow.empty:
-                # Buscar Free Cash Flow en diferentes formatos posibles
-                possible_fcf_names = [
-                    'Free Cash Flow', 'FreeCashFlow', 'Free cash flow',
-                    'Operating Cash Flow', 'Cash Flow from Operations'
-                ]
-                
-                for fcf_name in possible_fcf_names:
-                    if fcf_name in cash_flow.index:
-                        fcf_value = cash_flow.loc[fcf_name]
-                        if not fcf_value.empty:
+                # Buscar Free Cash Flow
+                for index_name in cash_flow.index:
+                    if 'free cash flow' in str(index_name).lower():
+                        fcf_value = cash_flow.loc[index_name]
+                        if not pd.isna(fcf_value.iloc[0]):
                             fcf = float(fcf_value.iloc[0])
                             break
-                
-                # Si no encontramos FCF, usar estimación basada en market cap
-                if fcf == 0:
-                    fcf = current_price * shares_outstanding * 0.05
-                    
         except Exception as e:
-            st.warning(f"No se pudo obtener FCF detallado: {e}")
-            fcf = current_price * shares_outstanding * 0.05
+            st.warning(f"No se pudo obtener FCF detallado, usando estimación: {e}")
         
         return {
             'current_price': float(current_price),
@@ -74,8 +71,12 @@ def get_financial_data(ticker):
             'fcf': float(fcf),
             'info': info
         }
+        
+    except URLError as e:
+        st.error(f"Error de conexión: {e}. Verifica tu conexión a internet.")
+        return None
     except Exception as e:
-        st.error(f"Error obteniendo datos: {str(e)}")
+        st.error(f"Error obteniendo datos para {ticker}: {str(e)}")
         return None
 
 # Función DCF simplificada
@@ -87,7 +88,7 @@ def dcf_valuation(current_fcf, growth_rate, terminal_growth, discount_rate, year
             
         # Asegurar que la tasa terminal sea menor que la de descuento
         if terminal_growth >= discount_rate:
-            terminal_growth = discount_rate - 0.01
+            terminal_growth = max(0, discount_rate - 0.01)
         
         # Proyectar flujos de caja futuros
         future_cash_flows = []
@@ -122,6 +123,9 @@ def dcf_valuation(current_fcf, growth_rate, terminal_growth, discount_rate, year
     except Exception as e:
         st.error(f"Error en cálculo DCF: {str(e)}")
         return None
+
+# Mostrar UI básica incluso si hay errores
+st.sidebar.info("💡 Ingresa un símbolo de ticker y haz clic en calcular")
 
 # Main app logic
 if st.sidebar.button("Calcular Valor Intrínseco"):
