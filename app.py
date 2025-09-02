@@ -25,41 +25,73 @@ growth_rate = st.sidebar.slider("Tasa de crecimiento inicial (%)", 0.0, 20.0, 5.
 terminal_growth = st.sidebar.slider("Tasa de crecimiento terminal (%)", 0.0, 5.0, 2.5) / 100
 discount_rate = st.sidebar.slider("Tasa de descuento (%)", 5.0, 15.0, 10.0) / 100
 
-# Función para obtener datos financieros
+# Función para obtener datos financieros - CORREGIDA
 @st.cache_data(ttl=3600)
 def get_financial_data(ticker):
     try:
         stock = yf.Ticker(ticker)
         info = stock.info
         
-        # Obtener datos básicos
-        current_price = info.get('currentPrice', info.get('regularMarketPrice', 0))
-        shares_outstanding = info.get('sharesOutstanding', 0)
+        # Obtener datos básicos con manejo de errores
+        current_price = info.get('currentPrice', info.get('regularMarketPrice', info.get('previousClose', 0)))
+        shares_outstanding = info.get('sharesOutstanding', info.get('floatShares', 1000000))
         
-        # Intentar obtener cash flow
+        # Obtener cash flow de forma más robusta
+        fcf = 0
         try:
             cash_flow = stock.cashflow
-            if not cash_flow.empty and 'Free Cash Flow' in cash_flow.index:
-                fcf = cash_flow.loc['Free Cash Flow'].iloc[0]
-            else:
-                # Si no hay FCF, usar un valor por defecto basado en market cap
-                fcf = current_price * shares_outstanding * 0.05  # 5% del market cap
-        except:
-            fcf = current_price * shares_outstanding * 0.05
+            if not cash_flow.empty:
+                # Buscar Free Cash Flow en diferentes formatos
+                for index_name in cash_flow.index:
+                    if 'free cash flow' in index_name.lower():
+                        fcf = cash_flow.loc[index_name].iloc[0] if not cash_flow.loc[index_name].empty else 0
+                        break
+                
+                # Si no encontramos FCF, intentar calcularlo
+                if fcf == 0:
+                    operating_cash_flow = 0
+                    capital_expenditure = 0
+                    
+                    for index_name in cash_flow.index:
+                        if 'operating cash flow' in index_name.lower():
+                            operating_cash_flow = cash_flow.loc[index_name].iloc[0] if not cash_flow.loc[index_name].empty else 0
+                        elif 'capital expenditure' in index_name.lower():
+                            capital_expenditure = cash_flow.loc[index_name].iloc[0] if not cash_flow.loc[index_name].empty else 0
+                    
+                    fcf = operating_cash_flow + capital_expenditure  # Capital expenditure es negativo
+        except Exception as e:
+            st.warning(f"No se pudo obtener FCF: {e}")
+            # Usar un valor por defecto basado en market cap
+            fcf = current_price * shares_outstanding * 0.03  # 3% del market cap como estimación
+        
+        # Asegurar que tenemos valores válidos
+        if shares_outstanding == 0:
+            shares_outstanding = 1000000
+        
+        if fcf == 0:
+            fcf = current_price * shares_outstanding * 0.03
         
         return {
-            'current_price': current_price,
-            'shares_outstanding': shares_outstanding,
-            'fcf': fcf,
+            'current_price': float(current_price),
+            'shares_outstanding': float(shares_outstanding),
+            'fcf': float(fcf),
             'info': info
         }
     except Exception as e:
         st.error(f"Error obteniendo datos: {str(e)}")
         return None
 
-# Función DCF simplificada
+# Función DCF simplificada - CORREGIDA
 def dcf_valuation(current_fcf, growth_rate, terminal_growth, discount_rate, years, shares):
     try:
+        # Validar inputs
+        if current_fcf <= 0 or shares <= 0:
+            return None
+            
+        if terminal_growth >= discount_rate:
+            st.warning("La tasa de crecimiento terminal debe ser menor que la tasa de descuento")
+            terminal_growth = discount_rate - 0.01  # Ajustar automáticamente
+        
         # Proyectar flujos de caja futuros
         future_cash_flows = []
         for year in range(1, years + 1):
@@ -100,7 +132,7 @@ if st.sidebar.button("Calcular Valor Intrínseco"):
         with st.spinner('Obteniendo datos y calculando...'):
             financial_data = get_financial_data(ticker_symbol)
             
-            if financial_data:
+            if financial_data and financial_data['current_price'] > 0:
                 # Mostrar información básica
                 col1, col2 = st.columns(2)
                 with col1:
@@ -191,7 +223,7 @@ if st.sidebar.button("Calcular Valor Intrínseco"):
                 else:
                     st.error("Error en el cálculo DCF. Revisa los parámetros.")
             else:
-                st.error("No se pudieron obtener datos financieros. Verifica el símbolo del ticker.")
+                st.error("No se pudieron obtener datos financieros válidos. Verifica el símbolo del ticker.")
     else:
         st.warning("Por favor ingresa un símbolo de ticker válido")
 
